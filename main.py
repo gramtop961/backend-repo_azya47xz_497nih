@@ -1,8 +1,12 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+from database import db, create_document, get_documents
+from schemas import BlogPost, Message
 
-app = FastAPI()
+app = FastAPI(title="Fitness Portfolio API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,15 +18,55 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Fitness Portfolio Backend Running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+# --- Blog Endpoints ---
+@app.get("/api/blogs", response_model=List[BlogPost])
+def list_blogs(tag: Optional[str] = None, limit: int = 20):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    flt = {"tags": {"$in": [tag]}} if tag else {}
+    docs = get_documents("blogpost", flt, limit)
+    # Convert _id to string and map to model
+    result = []
+    for d in docs:
+        d.pop("_id", None)
+        result.append(BlogPost(**d))
+    return result
 
+@app.get("/api/blogs/{slug}")
+def get_blog(slug: str):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    docs = get_documents("blogpost", {"slug": slug}, 1)
+    if not docs:
+        raise HTTPException(status_code=404, detail="Post not found")
+    doc = docs[0]
+    doc["id"] = str(doc.pop("_id", ""))
+    return doc
+
+@app.post("/api/blogs", status_code=201)
+def create_blog(post: BlogPost):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    # Ensure slug uniqueness
+    existing = get_documents("blogpost", {"slug": post.slug}, 1)
+    if existing:
+        raise HTTPException(status_code=400, detail="Slug already exists")
+    inserted_id = create_document("blogpost", post)
+    return {"id": inserted_id}
+
+# --- Contact Messages ---
+@app.post("/api/contact", status_code=201)
+def submit_message(msg: Message):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    inserted_id = create_document("message", msg)
+    return {"id": inserted_id, "status": "received"}
+
+# --- Utility: Health & DB test ---
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
@@ -31,39 +75,30 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
+
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
             response["database_url"] = "✅ Configured"
             response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
                 response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
         else:
             response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+
     except Exception as e:
         response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
+
     import os
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
 
+    return response
 
 if __name__ == "__main__":
     import uvicorn
